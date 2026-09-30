@@ -1,6 +1,20 @@
-import { BIOME_COPY, CHALLENGES, CORES, DIFFICULTIES, MODULES, MUTATORS, TRAILS } from '../content/catalog'
+import { BIOME_COPY, CORES, DIFFICULTIES, MODULES, MUTATORS, TRAILS } from '../content/catalog'
+import {
+  CHALLENGES,
+  CONTRACTS_RANK,
+  MASTERY_ECHO_BONUS,
+  MAX_MODULE_LEVEL,
+  RANK_REWARDS,
+  TUNING_RANK,
+  challengeBody,
+  rankTitle,
+  streakBonus,
+  tierName,
+  tuneCost,
+} from '../content/progression'
 import { unlockedBiomes } from '../content/world'
-import { difficultyUnlocked, loreLines, mutatorsUnlocked, type Meta, type Summary } from '../game/save'
+import { contractLabel, liveStreak, masteryOf, moduleLevel, nextSlot, rankOf, trailLocked, tuneBlock } from '../game/progress'
+import { difficultyUnlocked, loreLines, mutatorsUnlocked, todayKey, type Meta, type Summary } from '../game/save'
 import type { BiomeId, Choice } from '../sim/types'
 
 export interface HudModel {
@@ -36,6 +50,46 @@ function esc(s: string): string {
 
 function fmt(n: number): string {
   return Math.max(0, Math.floor(n)).toLocaleString('en-US')
+}
+
+const MK = ['', 'Mk I', 'Mk II', 'Mk III']
+
+function pct(share: number): string {
+  return `${(Math.max(0, Math.min(1, share)) * 100).toFixed(1)}%`
+}
+
+/** Rank badge with a bar through the current rank. `from` animates the fill from an earlier share. */
+function rankBar(rank: number, into: number, need: number, from = -1): string {
+  const start = from >= 0 ? `--from:${pct(from)};` : ''
+  return `<div class="rank">
+    <b class="rank-no" aria-label="Rank ${rank}">${rank}</b>
+    <div class="rank-body">
+      <p><strong>${esc(rankTitle(rank))}</strong><span>${fmt(into)} / ${fmt(need)} XP</span></p>
+      <div class="xpbar ${from >= 0 ? 'grow' : ''}"><span style="${start}--to:${pct(into / need)}"></span></div>
+    </div>
+  </div>`
+}
+
+function contractList(meta: Meta, compact: boolean): string {
+  const day = todayKey()
+  const board = meta.contracts
+  if (rankOf(meta.xp).rank < CONTRACTS_RANK) return `<p class="note">Daily contracts open at rank ${CONTRACTS_RANK}.</p>`
+  if (board.day !== day || !board.list.length) return '<p class="note">Today’s contracts are dealt when you next play.</p>'
+  const streak = liveStreak(board, day)
+  const rows = board.list
+    .map((c) => {
+      const share = Math.min(1, c.progress / c.goal)
+      return `<li class="${c.done ? 'done' : ''}">
+        <div><strong>${esc(contractLabel(c))}</strong><span>${c.done ? 'Done' : compact ? '' : `${fmt(Math.min(c.progress, c.goal))}/${fmt(c.goal)}`}</span></div>
+        ${compact ? '' : `<div class="bar"><span style="width:${pct(share)}"></span></div>`}
+      </li>`
+    })
+    .join('')
+  const sweep = board.lastSweep === day
+  const foot = sweep
+    ? `Board cleared · ${streak}-day streak`
+    : `Clear all three for a bonus${streak ? ` · streak ${streak}, next +${streakBonus(streak + 1)}` : ''}`
+  return `<ul class="challenges contracts ${compact ? 'compact' : ''}">${rows}</ul><p class="note">${esc(foot)}</p>`
 }
 
 function reducedMotion(): boolean {
@@ -310,6 +364,7 @@ export class Shell {
     const mutators = mutatorsUnlocked(meta) ? MUTATORS : MUTATORS.filter((m) => m.id === 'none')
     const best = meta.bestDistance > 0 ? `<b>${fmt(meta.bestDistance)} m</b> best` : 'No record yet'
     const core = CORES.find((c) => c.id === meta.equipped.core)
+    const rank = rankOf(meta.xp)
     const word = 'Bounce'
       .split('')
       .map((ch, i) => `<span class="ch" style="--i:${i}">${ch}</span>`)
@@ -324,6 +379,11 @@ export class Shell {
           <span class="chip"><i class="dot echo"></i>${meta.echoes} echoes</span>
           <span class="chip"><i class="dot core"></i>${esc(core?.name ?? 'Balanced')} · ${esc(core?.epithet ?? '')}</span>
         </div>
+        ${rankBar(rank.rank, rank.into, rank.need)}
+        <details class="today" ${meta.contracts.list.some((c) => !c.done) ? 'open' : ''}>
+          <summary>Today’s contracts</summary>
+          ${contractList(meta, true)}
+        </details>
         <div class="row">
           <label>Pace
             <select data-setting="difficulty">${diffs.map((d) => `<option value="${d.id}" ${d.id === meta.lastDifficulty ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>
@@ -339,7 +399,7 @@ export class Shell {
         </div>
         <div class="row wrap quiet">
           <button type="button" data-action="workshop">Workshop</button>
-          <button type="button" data-action="challenges">Challenges</button>
+          <button type="button" data-action="challenges">Progress</button>
           <button type="button" data-action="map">Paths</button>
           <button type="button" data-action="settings">Settings</button>
         </div>
@@ -400,8 +460,16 @@ export class Shell {
           ${stat('Speed', summary.speed, '', 1)}
           ${stat('Echoes', summary.echoes, '', 0, '+')}
         </dl>
+        ${summary.echoParts.length > 1 ? `<p class="parts">${summary.echoParts.map((p) => `${esc(p.label)} <b>+${fmt(p.value)}</b>`).join(' · ')}</p>` : ''}
+        <section class="gain">
+          ${rankBar(summary.rankAfter.rank, summary.rankAfter.into, summary.rankAfter.need, summary.rankAfter.rank > summary.rankBefore.rank ? 0 : summary.rankBefore.into / summary.rankBefore.need)}
+          <p class="parts">+${fmt(summary.xp)} XP${summary.xpParts.length ? ` · ${summary.xpParts.map((p) => `${esc(p.label)} ${fmt(p.value)}`).join(' · ')}` : ''}</p>
+          ${summary.rankLines.length ? `<ul class="rankups">${summary.rankLines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+          <p class="mastery ${summary.mastery.leveled ? 'up' : ''}">${esc(summary.mastery.core)} mastery ${summary.mastery.level}${summary.mastery.leveled ? ' · level up' : ''}${summary.mastery.next === null ? ' · mastered' : ` · ${fmt(summary.mastery.meters)}/${fmt(summary.mastery.next)} m`}</p>
+        </section>
         ${summary.gift ? `<p class="gift">${esc(summary.gift)} is in the workshop.</p>` : ''}
-        ${summary.newChallenges.length ? `<p class="gift">${summary.newChallenges.map((c) => `Challenge · ${esc(c)}`).join(' · ')}</p>` : ''}
+        ${summary.newChallenges.length ? `<p class="gift"><b>Challenges</b> · ${summary.newChallenges.map(esc).join(' · ')}</p>` : ''}
+        ${summary.contracts.length ? `<p class="gift"><b>Contracts</b> · ${summary.contracts.map(esc).join(' · ')}</p>` : ''}
         ${summary.goals.length ? `<ul class="goals">${summary.goals.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
         <button type="button" class="primary big" data-action="again">Play again <kbd>Space</kbd></button>
         <div class="row wrap quiet">
@@ -410,46 +478,72 @@ export class Shell {
         </div>
       </section>`, 'results')
     this.countUp()
-    this.say(`${summary.deathTitle}. ${Math.floor(summary.distance)} meters.`)
+    const ranked = summary.rankAfter.rank > summary.rankBefore.rank ? ` Rank ${summary.rankAfter.rank}.` : ''
+    this.say(`${summary.deathTitle}. ${Math.floor(summary.distance)} meters. ${summary.xp} XP.${ranked}`)
     this.focus('[data-action="again"]')
   }
 
   showWorkshop(meta: Meta) {
+    const rank = rankOf(meta.xp).rank
     const coreCards = CORES.map((c) => {
       const owned = meta.cores.includes(c.id)
       const on = meta.equipped.core === c.id
+      const m = masteryOf(meta, c.id)
+      const mastery = owned
+        ? `<p class="mastery-line"><span>Mastery ${m.level}${m.level > 1 ? ` · +${Math.round((m.level - 1) * MASTERY_ECHO_BONUS * 100)}% echoes` : ''}</span><span class="bar"><span style="width:${pct(m.share)}"></span></span></p>`
+        : ''
       return `<article class="item ${on ? 'on' : ''} ${owned ? '' : 'locked'}">
         <header><strong>${esc(c.name)}</strong><span>${esc(c.epithet)}</span></header>
         <p>${esc(c.body)}</p>
+        ${mastery}
         ${owned ? `<button type="button" data-action="equip-core" data-id="${c.id}" ${on ? 'class="equipped"' : ''}>${on ? 'Equipped' : 'Equip'}</button>` : `<button type="button" data-action="buy" data-kind="core" data-id="${c.id}" ${meta.echoes < c.cost ? 'disabled' : ''}>Unlock · ${c.cost}</button>`}
       </article>`
     }).join('')
     const mods = MODULES.map((m) => {
       const owned = meta.modules.includes(m.id)
       const on = meta.equipped.modules.includes(m.id)
+      const level = moduleLevel(meta, m.id)
+      const block = tuneBlock(meta, m.id)
+      const tune =
+        owned && level < MAX_MODULE_LEVEL
+          ? `<button type="button" data-action="tune" data-id="${m.id}" ${block ? 'disabled' : ''} title="${esc(block ?? '')}">${block?.startsWith('Rank') ? `${MK[level + 1]} at ${block.toLowerCase()}` : `Tune to ${MK[level + 1]} · ${tuneCost(m.cost, level)}`}</button>`
+          : ''
       return `<article class="item ${on ? 'on' : ''} ${owned ? '' : 'locked'}">
-        <header><strong>${esc(m.name)}</strong><span>${on ? 'Slotted' : owned ? 'Owned' : `${m.cost} echoes`}</span></header>
+        <header><strong>${esc(m.name)}${owned ? ` <small class="mk mk-${level}">${MK[level]}</small>` : ''}</strong><span>${on ? 'Slotted' : owned ? 'Owned' : `${m.cost} echoes`}</span></header>
         <p>${esc(m.body)}</p>
-        ${owned ? `<button type="button" data-action="equip-module" data-id="${m.id}">${on ? 'Remove' : 'Slot'}</button>` : `<button type="button" data-action="buy" data-kind="module" data-id="${m.id}" ${meta.echoes < m.cost ? 'disabled' : ''}>Unlock · ${m.cost}</button>`}
+        <div class="acts">
+          ${owned ? `<button type="button" data-action="equip-module" data-id="${m.id}">${on ? 'Remove' : 'Slot'}</button>` : `<button type="button" data-action="buy" data-kind="module" data-id="${m.id}" ${meta.echoes < m.cost ? 'disabled' : ''}>Unlock · ${m.cost}</button>`}
+          ${tune}
+        </div>
       </article>`
     }).join('')
     const trails = TRAILS.map((t) => {
       const owned = meta.trails.includes(t.id)
       const on = meta.equipped.trail === t.id
+      const gate = trailLocked(meta, t.id)
+      if (gate) return `<button type="button" class="swatch" style="--swatch:${t.color}" disabled><i></i>${esc(t.name)} · rank ${gate}</button>`
       return `<button type="button" class="swatch ${on ? 'on' : ''}" style="--swatch:${t.color}" ${owned ? `data-action="equip-trail" data-id="${t.id}"` : `data-action="buy" data-kind="trail" data-id="${t.id}"`} ${!owned && meta.echoes < t.cost ? 'disabled' : ''}>
         <i></i>${esc(t.name)}${owned ? '' : ` · ${t.cost}`}
       </button>`
     }).join('')
-    const slot = meta.slots >= 2 ? '<p class="note">Both module slots are open.</p>' : `<button type="button" data-action="buy" data-kind="slot" ${meta.echoes < 18 ? 'disabled' : ''}>Second slot · 18</button>`
+    const next = nextSlot(meta)
+    const ordinal = ['', 'First', 'Second', 'Third']
+    const slot = !next
+      ? '<p class="note">Every module slot is built.</p>'
+      : rank < next.rank
+        ? `<p class="note">The ${ordinal[meta.slots + 1].toLowerCase()} slot can be built at rank ${next.rank}.</p>`
+        : `<button type="button" data-action="buy" data-kind="slot" ${meta.echoes < next.cost ? 'disabled' : ''}>${ordinal[meta.slots + 1]} slot · ${next.cost}</button>`
+    const bench = rank >= TUNING_RANK[2] ? 'Owned modules can be tuned up to ' + MK[rank >= TUNING_RANK[3] ? 3 : 2] + '. Tuning sharpens the upside only.' : `The tuning bench opens at rank ${TUNING_RANK[2]}.`
     const grav = meta.gravity ? '<p class="note">Gravity pulse is learned. Press <kbd>F</kbd>.</p>' : `<button type="button" data-action="buy" data-kind="gravity" ${meta.echoes < 36 ? 'disabled' : ''}>Learn gravity pulse · 36</button>`
     this.mount(`
       <section class="sheet wide">
         <p class="eyebrow">Workshop · <b class="echoes">${meta.echoes} echoes</b></p>
         <h2>This is your ball.</h2>
-        <p class="lede">Cores and modules change the line. Trails do not. One module slot is free; the second is earned.</p>
+        <p class="lede">Cores and modules change the line. Trails do not. Cores grow mastery as you travel with them.</p>
         <h3>Cores</h3>
         <div class="items">${coreCards}</div>
         <h3>Modules · ${meta.equipped.modules.length}/${meta.slots}</h3>
+        <p class="note">${esc(bench)}</p>
         <div class="items">${mods}</div>
         ${slot}
         <h3>Gravity</h3>
@@ -462,25 +556,41 @@ export class Shell {
   }
 
   showChallenges(meta: Meta) {
+    const rank = rankOf(meta.xp)
     const rows = CHALLENGES.map((c) => {
-      const prog = meta.challenges[c.id]
-      const value = Math.min(c.goal, Math.floor(prog?.progress ?? 0))
-      const done = !!prog?.claimed || value >= c.goal
+      const state = meta.challenges[c.id] ?? { progress: 0, tier: 0 }
+      const done = state.tier >= c.tiers.length
+      const index = Math.min(state.tier, c.tiers.length - 1)
+      const tier = c.tiers[index]
+      const value = Math.min(tier.goal, Math.floor(state.progress))
+      const pips = c.tiers.map((_, i) => `<i class="${i < state.tier ? 'on' : ''}"></i>`).join('')
       return `<li class="${done ? 'done' : ''}">
-        <div><strong>${esc(c.title)}</strong><span>${value}/${c.goal}</span></div>
-        <p>${esc(c.body)} · ${c.reward} echoes</p>
-        <div class="bar"><span style="width:${((value / c.goal) * 100).toFixed(1)}%"></span></div>
+        <div><strong>${esc(done ? c.title : tierName(c, index))}</strong><span class="pips" aria-label="${state.tier} of ${c.tiers.length} tiers">${pips}</span></div>
+        <p>${esc(challengeBody(c, index))} · ${done ? 'complete' : `${fmt(value)}/${fmt(tier.goal)} · ${tier.reward} echoes`}</p>
+        <div class="bar"><span style="width:${pct(done ? 1 : value / tier.goal)}"></span></div>
       </li>`
     }).join('')
+    const track = RANK_REWARDS.map(
+      (r) => `<li class="${r.rank <= rank.rank ? 'on' : ''}"><strong>Rank ${r.rank}</strong><span>${esc(r.label)}</span></li>`,
+    ).join('')
+    const cleared = CHALLENGES.reduce((n, c) => n + Math.min(c.tiers.length, meta.challenges[c.id]?.tier ?? 0), 0)
+    const total = CHALLENGES.reduce((n, c) => n + c.tiers.length, 0)
     const records = meta.records
       .map((r) => `<li>${Math.floor(r.distance).toLocaleString('en-US')} m · ${r.score.toLocaleString('en-US')} · ${r.difficulty}</li>`)
       .join('')
     const lore = loreLines(meta)
     this.mount(`
       <section class="sheet wide">
-        <p class="eyebrow">Challenges</p>
+        <p class="eyebrow">Progress · <b class="echoes">${meta.echoes} echoes</b></p>
         <h2>Unfinished on purpose.</h2>
+        ${rankBar(rank.rank, rank.into, rank.need)}
+        <p class="note">XP comes from every run: distance, clean landings, lines, and flow. Harder paces and mutators pay more.</p>
+        <h3>Today’s contracts</h3>
+        ${contractList(meta, false)}
+        <h3>Challenges · ${cleared}/${total} tiers</h3>
         <ul class="challenges">${rows}</ul>
+        <h3>Rank rewards</h3>
+        <ul class="tree">${track}</ul>
         <h3>On this device</h3>
         ${records ? `<ul class="records">${records}</ul>` : '<p class="note">Records appear after a run.</p>'}
         ${lore.length ? `<h3>Fragments</h3><ul class="records">${lore.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}

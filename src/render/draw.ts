@@ -218,6 +218,10 @@ const TRAIL_COLOR: Record<TrailId, string> = {
   ion: '#7ee0ff',
   petal: '#ff9ec8',
   void: '#c4b5fd',
+  aurora: '#5ef2b5',
+  nova: '#ff4d6d',
+  solar: '#fff27a',
+  halo: '#f0e6ff',
 }
 
 export function trailColorOf(trail: TrailId): string {
@@ -1719,11 +1723,13 @@ function drawBall(ctx: CanvasRenderingContext2D, sim: Sim, fx: ViewFx, look: Loo
   }
 }
 
+const ADDITIVE_TRAILS = new Set<TrailId>(['ember', 'ion', 'void', 'aurora', 'nova', 'halo'])
+
 function drawTrail(ctx: CanvasRenderingContext2D, sim: Sim, fx: ViewFx) {
   const pts = fx.trail
   if (pts.length < 2) return
   const color = trailColorOf(sim.config.trail)
-  const additive = sim.config.trail === 'ember' || sim.config.trail === 'ion' || sim.config.trail === 'void'
+  const additive = ADDITIVE_TRAILS.has(sim.config.trail)
   const base = rgb(color)
   const hot = mix(base, [255, 255, 255], 0.55)
   const r = sim.ball.r

@@ -140,6 +140,8 @@ export interface TrailDef {
   body: string
   cost: number
   color: string
+  /** Granted on reaching this pilot rank instead of being bought. */
+  rank?: number
 }
 
 export const TRAILS: TrailDef[] = [
@@ -149,6 +151,10 @@ export const TRAILS: TrailDef[] = [
   { id: 'ion', name: 'Ion', body: 'A cool filament. Reads clearly against dark biomes.', cost: 8, color: '#7ee0ff' },
   { id: 'petal', name: 'Petal', body: 'Soft flakes. A meadow souvenir.', cost: 10, color: '#ff9ec8' },
   { id: 'void', name: 'Void Thread', body: 'A thin violet scar. Earned past the quiet places.', cost: 18, color: '#c4b5fd' },
+  { id: 'aurora', name: 'Aurora', body: 'A green veil that ripples with the arc.', cost: 0, color: '#5ef2b5', rank: 3 },
+  { id: 'nova', name: 'Nova', body: 'A hot red wake. For pilots who stopped braking.', cost: 0, color: '#ff4d6d', rank: 7 },
+  { id: 'solar', name: 'Solar', body: 'White-gold, bright enough to read in any reach.', cost: 0, color: '#fff27a', rank: 12 },
+  { id: 'halo', name: 'Halo', body: 'A pale ring of light. Twenty ranks deep.', cost: 0, color: '#f0e6ff', rank: 20 },
 ]
 
 export interface UpgradeDef {
@@ -177,37 +183,6 @@ export const UPGRADES: UpgradeDef[] = [
   { id: 'heavy', kicker: 'Risk', title: 'Heavy Landing', body: 'Fast, centered landings detonate extra score.', tone: 'risk' },
   { id: 'echo', kicker: 'Utility', title: 'Echo Cache', body: 'A small purse of echoes. The bounce is unchanged.', tone: 'utility' },
   { id: 'breath', kicker: 'Utility', title: 'Breath', body: 'The next stretches of road widen and slow down.', tone: 'utility' },
-]
-
-export interface ChallengeDef {
-  id: string
-  title: string
-  body: string
-  goal: number
-  reward: number
-  metric:
-    | 'runDistance'
-    | 'lifePerfects'
-    | 'runWalls'
-    | 'lifeEnemies'
-    | 'maxSpeed'
-    | 'bestChain'
-    | 'biomeIndustrial'
-    | 'runNears'
-    | 'daily'
-}
-
-export const CHALLENGES: ChallengeDef[] = [
-  { id: 'd500', title: 'First Horizon', body: 'Travel 500m in a single run.', goal: 500, reward: 8, metric: 'runDistance' },
-  { id: 'd2000', title: 'Long Arc', body: 'Travel 2,000m in a single run.', goal: 2000, reward: 16, metric: 'runDistance' },
-  { id: 'perfects', title: 'Clean Landings', body: 'Land 25 perfect bounces across your career.', goal: 25, reward: 12, metric: 'lifePerfects' },
-  { id: 'walls', title: 'Rebound', body: 'Wall-bounce 10 times in one run.', goal: 10, reward: 12, metric: 'runWalls' },
-  { id: 'enemies', title: 'Living Steps', body: 'Bounce off 15 enemies.', goal: 15, reward: 10, metric: 'lifeEnemies' },
-  { id: 'speed', title: 'Critical', body: 'Reach momentum 18.', goal: 18, reward: 10, metric: 'maxSpeed' },
-  { id: 'combo', title: 'In Phrase', body: 'Build a flow chain of 20.', goal: 20, reward: 12, metric: 'bestChain' },
-  { id: 'industrial', title: 'Into the Works', body: 'Enter the Industrial reach.', goal: 1, reward: 10, metric: 'biomeIndustrial' },
-  { id: 'nearmiss', title: 'Thread', body: 'Earn 8 near misses in one run.', goal: 8, reward: 10, metric: 'runNears' },
-  { id: 'daily', title: "Today's Course", body: 'Travel 800m on today’s shared seed.', goal: 800, reward: 14, metric: 'daily' },
 ]
 
 export interface MutatorDef {

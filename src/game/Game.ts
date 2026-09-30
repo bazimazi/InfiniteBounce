@@ -12,6 +12,7 @@ import { createRun, defaultConfig } from '../sim/create'
 import { fixedStep } from '../sim/step'
 import type { GhostSample, InputFrame, Sim, SimEvent } from '../sim/types'
 import { Shell, type BannerKind, type HudModel } from '../ui/shell'
+import { contractLabel, ensureContracts, factsOf, metContracts, tuneModule } from './progress'
 import {
   buy,
   commitRun,
@@ -23,6 +24,7 @@ import {
   mutatorsUnlocked,
   saveMeta,
   speedLabel,
+  todayKey,
   toggleModule,
   track,
   type Meta,
@@ -65,6 +67,9 @@ export class Game {
   private lastPunch = 0
   private deadFade = 0
   private biomeBanner = false
+  /** Contracts already called out during this run, so each fires once. */
+  private announced = new Set<string>()
+  private contractCheck = 0
   private elapsed = 0
   private frameDt = 0.016
   private readonly input = new Input()
@@ -77,6 +82,7 @@ export class Game {
 
   constructor() {
     this.meta = loadMeta()
+    this.dealContracts()
     this.attract = this.makeRun(false, true)
     this.canvas = document.querySelector('#view')!
     const ctx = this.canvas.getContext('2d')
@@ -150,6 +156,7 @@ export class Game {
         this.advance(sim, clean, dt)
       }
       this.presentChoice(sim)
+      this.watchContracts(sim, dt)
       if (sim.dead) this.deathAt = this.elapsed
     } else if (playing && sim.dead && !this.committed && this.elapsed - this.deathAt > 720) {
       this.finish()
@@ -344,6 +351,24 @@ export class Game {
       default:
         break
     }
+  }
+
+  /** Calls out a contract the moment the run meets it. Payment still waits for the run to end. */
+  private watchContracts(sim: Sim, dt: number) {
+    if (sim.config.practice || !this.meta.contracts.list.length) return
+    this.contractCheck -= dt
+    if (this.contractCheck > 0) return
+    this.contractCheck = 0.25
+    for (const c of metContracts(this.meta, factsOf(sim, this.daily), todayKey())) {
+      if (this.announced.has(c.id)) continue
+      this.announced.add(c.id)
+      this.audio.chord()
+      this.toast('Contract met', contractLabel(c))
+    }
+  }
+
+  private dealContracts() {
+    if (ensureContracts(this.meta, todayKey(), mutatorsUnlocked(this.meta))) saveMeta(this.meta)
   }
 
   private toast(title: string, sub = '', kind: BannerKind = 'default') {
@@ -544,6 +569,13 @@ export class Game {
         this.shell.showWorkshop(this.meta)
         break
       }
+      case 'tune':
+        if (tuneModule(this.meta, el.dataset.id as Meta['equipped']['modules'][number])) {
+          saveMeta(this.meta)
+          this.audio.chord()
+        }
+        this.shell.showWorkshop(this.meta)
+        break
       case 'equip-core':
         equipCore(this.meta, (el.dataset.id as Meta['equipped']['core']) ?? 'balanced')
         saveMeta(this.meta)
@@ -600,6 +632,9 @@ export class Game {
     if (this.meta.lastMutator !== 'none' && !mutatorsUnlocked(this.meta)) this.meta.lastMutator = 'none'
     this.daily = daily
     this.committed = false
+    this.announced.clear()
+    this.contractCheck = 0
+    this.dealContracts()
     this.sim = this.makeRun(daily, false)
     this.mode = 'play'
     this.menuReturn = 'pause'
@@ -700,6 +735,7 @@ export class Game {
       summary.deathLine = 'The bounce is still there.'
     }
     saveMeta(this.meta)
+    if (summary.rankAfter.rank > summary.rankBefore.rank) this.audio.chord()
     this.summary = summary
     this.mode = 'results'
     this.menuReturn = 'results'
@@ -714,6 +750,7 @@ export class Game {
     this.committed = false
     this.daily = false
     this.shell.banner('')
+    this.dealContracts()
     this.shell.showTitle(this.meta)
     if (this.attract.dead) this.attract = this.makeRun(false, true)
   }
@@ -731,6 +768,7 @@ export class Game {
         tutorial: !attract && !practice && !daily && !meta.tutorialDone && meta.runs === 0,
         gravityAbility: attract ? false : meta.gravity,
         modules: attract ? [] : [...meta.equipped.modules],
+        moduleLevels: attract ? {} : { ...meta.moduleLevels },
         trail: attract ? 'dusk' : meta.equipped.trail,
         seen: attract || practice ? [] : [...meta.seen],
         visited: attract || practice ? ['meadow'] : [...meta.visited],

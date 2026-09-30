@@ -1,10 +1,30 @@
-import { CHALLENGES, CORES, DEATH_COPY, DIFFICULTIES, FRAGMENTS, MODULES, TRAILS } from '../content/catalog'
+import { CORES, DEATH_COPY, DIFFICULTIES, FRAGMENTS, MODULES, TRAILS } from '../content/catalog'
+import { CHALLENGES, challengeBody, tierName } from '../content/progression'
 import { unlockedBiomes } from '../content/world'
 import { fnv1a } from '../core/math'
 import type { BiomeId, CoreId, Difficulty, GhostSample, ModuleId, MutatorId, Sim, TrailId } from '../sim/types'
 import { PX_PER_METER } from '../sim/types'
+import {
+  contractLabel,
+  emptyBoard,
+  ensureContracts,
+  factsOf,
+  grantRanks,
+  masteryEchoMul,
+  masteryOf,
+  nextRankReward,
+  nextSlot,
+  rankOf,
+  runXp,
+  settleChallenges,
+  settleContracts,
+  type ChallengeState,
+  type ContractBoard,
+  type XpPart,
+} from './progress'
 
 const KEY = 'infinite-bounce-v1'
+const META_VERSION = 2
 
 export interface Settings {
   music: number
@@ -40,8 +60,12 @@ export interface TelemetryEvent {
 }
 
 export interface Meta {
-  version: 1
+  version: number
   echoes: number
+  /** Total pilot XP ever earned; rank is derived from it. */
+  xp: number
+  /** Highest rank whose rewards have been paid. */
+  rankClaimed: number
   runs: number
   bestDistance: number
   bestScore: number
@@ -60,11 +84,14 @@ export interface Meta {
   visited: BiomeId[]
   cores: CoreId[]
   modules: ModuleId[]
+  moduleLevels: Partial<Record<ModuleId, number>>
+  coreMeters: Partial<Record<CoreId, number>>
   slots: number
   equipped: { core: CoreId; modules: ModuleId[]; trail: TrailId }
   trails: TrailId[]
   gravity: boolean
-  challenges: Record<string, { progress: number; claimed: boolean }>
+  challenges: Record<string, ChallengeState>
+  contracts: ContractBoard
   fragments: number[]
   seen: string[]
   settings: Settings
@@ -87,10 +114,18 @@ export interface Summary {
   deathTitle: string
   deathLine: string
   echoes: number
+  echoParts: XpPart[]
   record: boolean
   gift: string | null
   goals: string[]
   newChallenges: string[]
+  contracts: string[]
+  xp: number
+  xpParts: XpPart[]
+  rankBefore: { rank: number; into: number; need: number }
+  rankAfter: { rank: number; into: number; need: number; title: string }
+  rankLines: string[]
+  mastery: { core: string; level: number; leveled: boolean; share: number; next: number | null; meters: number }
 }
 
 function prefersReduced(): boolean {
@@ -116,8 +151,10 @@ export function defaultSettings(): Settings {
 
 export function defaultMeta(): Meta {
   return {
-    version: 1,
+    version: META_VERSION,
     echoes: 0,
+    xp: 0,
+    rankClaimed: 1,
     runs: 0,
     bestDistance: 0,
     bestScore: 0,
@@ -127,11 +164,14 @@ export function defaultMeta(): Meta {
     visited: ['meadow'],
     cores: ['balanced'],
     modules: [],
+    moduleLevels: {},
+    coreMeters: {},
     slots: 1,
     equipped: { core: 'balanced', modules: [], trail: 'dusk' },
     trails: ['none', 'dusk'],
     gravity: false,
     challenges: {},
+    contracts: emptyBoard(),
     fragments: [],
     seen: [],
     settings: defaultSettings(),
@@ -161,7 +201,9 @@ export function loadMeta(): Meta {
     if (!raw) return defaultMeta()
     const parsed = JSON.parse(raw) as Partial<Meta>
     const base = defaultMeta()
-    const meta = { ...base, ...parsed, lifetime: { ...base.lifetime, ...parsed.lifetime }, equipped: { ...base.equipped, ...parsed.equipped }, settings: { ...base.settings, ...parsed.settings }, daily: { ...base.daily, ...parsed.daily } }
+    const meta = { ...base, ...parsed, lifetime: { ...base.lifetime, ...parsed.lifetime }, equipped: { ...base.equipped, ...parsed.equipped }, settings: { ...base.settings, ...parsed.settings }, daily: { ...base.daily, ...parsed.daily }, contracts: { ...base.contracts, ...parsed.contracts } }
+    if ((parsed.version ?? 1) < 2) migrateV1(meta)
+    meta.slots = Math.max(1, Math.min(3, meta.slots))
     meta.equipped.modules = (meta.equipped.modules ?? []).filter((id) => meta.modules.includes(id)).slice(0, meta.slots)
     if (!meta.cores.includes(meta.equipped.core)) meta.equipped.core = 'balanced'
     if (!meta.trails.includes(meta.equipped.trail)) meta.equipped.trail = 'dusk'
@@ -169,6 +211,30 @@ export function loadMeta(): Meta {
   } catch {
     return defaultMeta()
   }
+}
+
+/**
+ * Version 1 had flat challenges and no rank. Tiers already paid stay paid, and
+ * past play is converted to XP so veterans start at a rank that reflects it.
+ */
+function migrateV1(meta: Meta) {
+  const old = meta.challenges as unknown as Record<string, { progress?: number; claimed?: boolean; tier?: number }>
+  const next: Record<string, ChallengeState> = {}
+  for (const def of CHALLENGES) {
+    const prev = old[def.id]
+    if (!prev) continue
+    next[def.id] = { progress: prev.progress ?? 0, tier: prev.tier ?? (prev.claimed ? 1 : 0) }
+  }
+  // The old 2,000m challenge folded into Horizon; its tiers up to 2,000m were paid.
+  if (old.d2000?.claimed) next.d500 = { progress: Math.max(next.d500?.progress ?? 0, meta.bestDistance), tier: Math.max(next.d500?.tier ?? 0, 3) }
+  meta.challenges = next
+  const l = meta.lifetime
+  meta.xp = Math.round(l.distance / 8 + l.perfects * 4 + (l.walls + l.enemies) * 3 + l.nears * 5)
+  meta.coreMeters = { [meta.equipped.core]: Math.round(l.distance) }
+  meta.version = META_VERSION
+  // Career challenges (dashes, runs, odometer...) are new; credit what was already done.
+  settleChallenges(meta, null)
+  grantRanks(meta)
 }
 
 export function saveMeta(meta: Meta) {
@@ -193,33 +259,6 @@ export function difficultyUnlocked(meta: Meta, id: Difficulty): boolean {
 
 export function mutatorsUnlocked(meta: Meta): boolean {
   return meta.bestDistance >= 2500 || meta.runs >= 12
-}
-
-function challengeValue(meta: Meta, id: string, sim: Sim, dailyRun: boolean): number {
-  const def = CHALLENGES.find((c) => c.id === id)
-  if (!def) return 0
-  switch (def.metric) {
-    case 'runDistance':
-      return sim.distance
-    case 'lifePerfects':
-      return meta.lifetime.perfects
-    case 'runWalls':
-      return sim.stats.walls
-    case 'lifeEnemies':
-      return meta.lifetime.enemies
-    case 'maxSpeed':
-      return meta.bestSpeed
-    case 'bestChain':
-      return meta.bestChain
-    case 'biomeIndustrial':
-      return meta.visited.includes('industrial') ? 1 : 0
-    case 'runNears':
-      return sim.stats.nears
-    case 'daily':
-      return dailyRun && meta.daily.day === todayKey() ? meta.daily.distance : (meta.challenges[id]?.progress ?? 0)
-    default:
-      return 0
-  }
 }
 
 export function goals(meta: Meta): string[] {
@@ -249,16 +288,25 @@ export function goals(meta: Meta): string[] {
     }
     out.push(hints[nextBiome] ?? 'A further reach is still closed')
   }
-  const challenge = CHALLENGES.find((c) => (meta.challenges[c.id]?.progress ?? 0) < c.goal)
+  const contract = meta.contracts.day === todayKey() ? meta.contracts.list.find((c) => !c.done) : undefined
+  if (contract) out.push(`Contract · ${contractLabel(contract)}`)
+  // The open challenge tier closest to done, so the hint is always a near target.
+  const challenge = CHALLENGES.flatMap((def) => {
+    const state = meta.challenges[def.id] ?? { progress: 0, tier: 0 }
+    const tier = def.tiers[state.tier]
+    return tier ? [{ def, state, tier, share: state.progress / tier.goal }] : []
+  }).sort((x, y) => y.share - x.share)[0]
   if (challenge) {
-    const p = Math.floor(meta.challenges[challenge.id]?.progress ?? 0)
-    out.push(`${challenge.title}: ${Math.min(p, challenge.goal)}/${challenge.goal}`)
+    const p = Math.min(Math.floor(challenge.state.progress), challenge.tier.goal)
+    out.push(`${tierName(challenge.def, challenge.state.tier)} · ${challengeBody(challenge.def, challenge.state.tier).replace(/\.$/, '')} · ${p.toLocaleString('en-US')}/${challenge.tier.goal.toLocaleString('en-US')}`)
   }
   const affordable = [...CORES.filter((c) => !meta.cores.includes(c.id)), ...MODULES.filter((m) => !meta.modules.includes(m.id))].sort((a, b) => a.cost - b.cost)[0]
   if (affordable) {
     const need = Math.max(0, affordable.cost - meta.echoes)
     out.push(need === 0 ? `${affordable.name} is ready in the workshop` : `${affordable.name} needs ${need} more echoes`)
   }
+  const reward = nextRankReward(rankOf(meta.xp).rank)
+  if (reward) out.push(`Rank ${reward.rank} brings: ${reward.label}`)
   if (!out.length) out.push('Take a mutator. The safe habits are the ones to break.')
   return out.slice(0, 3)
 }
@@ -268,6 +316,9 @@ export function commitRun(meta: Meta, sim: Sim, dailyRun: boolean): Summary {
   const chain = sim.stats.maxChain
   const speed = sim.stats.maxSpeed
   const record = distance > meta.bestDistance && distance > 30
+  const day = todayKey()
+  const before = rankOf(meta.xp)
+  const run = factsOf(sim, dailyRun)
   meta.runs += 1
   meta.lifetime.distance += distance
   meta.lifetime.perfects += sim.stats.perfects
@@ -289,29 +340,33 @@ export function commitRun(meta: Meta, sim: Sim, dailyRun: boolean): Summary {
   for (const id of sim.seen) if (!meta.seen.includes(id)) meta.seen.push(id)
   for (const id of sim.fragments) if (!meta.fragments.includes(id)) meta.fragments.push(id)
   if (dailyRun) {
-    const day = todayKey()
     if (meta.daily.day !== day || distance > meta.daily.distance) {
       meta.daily = { day, distance: Math.max(meta.daily.day === day ? meta.daily.distance : 0, distance), score: sim.score }
     }
   }
 
-  const newChallenges: string[] = []
-  let bonus = 0
-  for (const c of CHALLENGES) {
-    const prev = meta.challenges[c.id] ?? { progress: 0, claimed: false }
-    const value = Math.max(prev.progress, challengeValue(meta, c.id, sim, dailyRun))
-    const claimed = prev.claimed
-    meta.challenges[c.id] = { progress: value, claimed }
-    if (!claimed && value >= c.goal) {
-      meta.challenges[c.id].claimed = true
-      bonus += c.reward
-      newChallenges.push(c.title)
-    }
-  }
+  // Mastery pays at the level the core had going in; the run then feeds the next level.
+  const core = sim.config.core
+  const masteryBefore = masteryOf(meta, core)
+  meta.coreMeters[core] = (meta.coreMeters[core] ?? 0) + Math.floor(distance)
+  const masteryAfter = masteryOf(meta, core)
 
   const style = sim.stats.perfects * 2 + sim.stats.nears + Math.floor(chain / 4) + sim.fragments.length * 6
-  const earned = Math.floor(distance / 75) + sim.echoes + style + bonus
-  meta.echoes += earned
+  const road = Math.floor(distance / 75)
+  const base = road + sim.echoes + style
+  const mastery = Math.floor(base * (masteryEchoMul(masteryBefore.level) - 1))
+  meta.echoes += base + mastery
+
+  // Deal before this run's XP lands, so a run that unlocks contracts doesn't also clear them.
+  ensureContracts(meta, day, mutatorsUnlocked(meta))
+  const xp = runXp(run)
+  meta.xp += xp.total
+  const challenges = settleChallenges(meta, run)
+  const contracts = settleContracts(meta, run, day)
+  const purseFrom = meta.echoes
+  const rankLines = grantRanks(meta)
+  const ranks = meta.echoes - purseFrom
+  const earned = base + mastery + challenges.echoes + contracts.echoes + ranks
 
   let gift: string | null = null
   if (!meta.gifted) {
@@ -327,12 +382,27 @@ export function commitRun(meta: Meta, sim: Sim, dailyRun: boolean): Summary {
     speed: Math.round(speed),
     seed: sim.config.seed,
     difficulty: sim.config.difficulty,
-    core: sim.config.core,
-    day: todayKey(),
+    core,
+    day,
   })
   meta.records = meta.records.slice(0, 8)
   const death = DEATH_COPY[sim.death ?? 'FALLEN'] ?? DEATH_COPY.FALLEN
   track(meta, 'run_end', distance, sim.death ?? 'quit')
+  const after = rankOf(meta.xp)
+  const echoParts: XpPart[] = [
+    { label: 'Road', value: road },
+    { label: 'Pickups', value: sim.echoes },
+    { label: 'Style', value: style },
+    { label: 'Mastery', value: mastery },
+    { label: 'Challenges', value: challenges.echoes },
+    { label: 'Contracts', value: contracts.echoes },
+    { label: 'Rank', value: ranks },
+  ].filter((p) => p.value > 0)
+  const xpParts: XpPart[] = [
+    ...xp.parts,
+    { label: 'Challenges', value: challenges.xp },
+    { label: 'Contracts', value: contracts.xp },
+  ].filter((p) => p.value > 0)
   return {
     distance,
     score: Math.floor(sim.score),
@@ -341,10 +411,25 @@ export function commitRun(meta: Meta, sim: Sim, dailyRun: boolean): Summary {
     deathTitle: death.title,
     deathLine: death.line,
     echoes: earned,
+    echoParts,
     record,
     gift,
     goals: goals(meta),
-    newChallenges,
+    newChallenges: challenges.lines,
+    contracts: contracts.lines,
+    xp: xp.total + challenges.xp + contracts.xp,
+    xpParts,
+    rankBefore: { rank: before.rank, into: before.into, need: before.need },
+    rankAfter: { rank: after.rank, into: after.into, need: after.need, title: after.title },
+    rankLines,
+    mastery: {
+      core: CORES.find((c) => c.id === core)?.name ?? core,
+      level: masteryAfter.level,
+      leveled: masteryAfter.level > masteryBefore.level,
+      share: masteryAfter.share,
+      next: masteryAfter.next,
+      meters: masteryAfter.meters,
+    },
   }
 }
 
@@ -355,6 +440,9 @@ export function buy(meta: Meta, kind: 'core' | 'module' | 'trail' | 'slot' | 'gr
     meta.echoes -= def.cost
     meta.cores.push(def.id)
     track(meta, 'unlock', undefined, def.id)
+    // Owning cores is itself a challenge; settle it now rather than after the next run.
+    settleChallenges(meta, null)
+    grantRanks(meta)
     return true
   }
   if (kind === 'module') {
@@ -367,16 +455,17 @@ export function buy(meta: Meta, kind: 'core' | 'module' | 'trail' | 'slot' | 'gr
   }
   if (kind === 'trail') {
     const def = TRAILS.find((t) => t.id === id)
-    if (!def || meta.trails.includes(def.id) || meta.echoes < def.cost) return false
+    if (!def || def.rank || meta.trails.includes(def.id) || meta.echoes < def.cost) return false
     meta.echoes -= def.cost
     meta.trails.push(def.id)
     track(meta, 'unlock', undefined, def.id)
     return true
   }
   if (kind === 'slot') {
-    if (meta.slots >= 2 || meta.echoes < 18) return false
-    meta.echoes -= 18
-    meta.slots = 2
+    const slot = nextSlot(meta)
+    if (!slot || meta.echoes < slot.cost || rankOf(meta.xp).rank < slot.rank) return false
+    meta.echoes -= slot.cost
+    meta.slots += 1
     return true
   }
   if (kind === 'gravity') {

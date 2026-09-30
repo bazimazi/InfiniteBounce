@@ -1,4 +1,5 @@
 import { CORES, coreById } from '../content/catalog'
+import { moduleBoost } from '../content/progression'
 import { MODE } from '../content/tune'
 import type { CoreId, Difficulty, ModuleId, Mods, MutatorId } from './types'
 
@@ -41,6 +42,7 @@ export function computeMods(
   upgrades: readonly string[],
   difficulty: Difficulty,
   mutator: MutatorId,
+  levels: Partial<Record<ModuleId, number>> = {},
 ): Mods {
   const core = coreById(coreId)
   const mode = MODE[difficulty]
@@ -61,40 +63,46 @@ export function computeMods(
   m.control = 1
 
   const has = (id: string) => modules.includes(id as ModuleId) || upgrades.includes(id)
+  // A tuned module scales its upside only; the cost it asks stays the same.
+  const up = (id: ModuleId) => (modules.includes(id) ? moduleBoost(levels[id] ?? 1) : 1)
 
   if (has('momentum')) {
-    m.frictionKeep *= 1.012
+    const b = up('momentum')
+    m.frictionKeep *= 1 + 0.012 * b
     m.brake *= 0.9
-    m.maxVx *= 1.04
+    m.maxVx *= 1 + 0.04 * b
   }
   if (modules.includes('bounce') || upgrades.includes('spring')) {
-    m.bounce *= 1.1
-    m.minBounce *= 1.05
+    const b = up('bounce')
+    m.bounce *= 1 + 0.1 * b
+    m.minBounce *= 1 + 0.05 * b
     m.air *= 0.92
   }
   if (modules.includes('speed')) {
-    m.maxVx *= 1.12
+    m.maxVx *= 1 + 0.12 * up('speed')
     m.control *= 0.82
   }
   if (has('brake')) {
-    m.brake *= 1.42
+    m.brake *= 1 + 0.42 * up('brake')
     m.maxVx *= 0.94
   }
   if (modules.includes('combo') || upgrades.includes('keeper')) {
-    m.flowDecay *= 0.62
+    m.flowDecay *= 1 - 0.38 * up('combo')
     m.score *= 0.94
   }
   if (modules.includes('risk') || upgrades.includes('risk')) {
-    m.near *= 1.65
-    m.score *= 1.08
+    const b = up('risk')
+    m.near *= 1 + 0.65 * b
+    m.score *= 1 + 0.08 * b
     m.flowDecay *= 1.38
   }
   if (has('wall')) {
-    m.wall *= 1.18
-    m.wallPop += 70
+    const b = up('wall')
+    m.wall *= 1 + 0.18 * b
+    m.wallPop += 70 * b
     m.accel *= 0.92
   }
-  if (has('magnet')) m.magnet += 1
+  if (has('magnet')) m.magnet += up('magnet')
   if (upgrades.includes('air')) m.air *= 1.38
   if (upgrades.includes('dash2')) m.dashCharges += 1
   if (upgrades.includes('dashfast')) m.dashCd *= 0.7
@@ -127,6 +135,7 @@ export function computeMods(
   m.frictionKeep = clamp(m.frictionKeep, 0.9, 1.03)
   m.score = clamp(m.score, 0.8, 1.35)
   m.near = clamp(m.near, 1, 2.4)
+  m.flowDecay = clamp(m.flowDecay, 0.3, 2)
   return m
 }
 

@@ -25,6 +25,16 @@ The low road is always a possible landing. Gold trim is optional.
 
 Runs, echoes, cores, modules, trails, challenges, and a personal-best ghost are stored in this browser under `infinite-bounce-v1`. Notes in Settings stay on the device.
 
+## Progression
+
+- **Pilot rank.** Every run earns XP for distance, perfects, walls, enemies, near misses, flow, and fragments. Harder paces and mutators pay more. Each rank pays a small echo purse. Milestone ranks open daily contracts (2), the tuning bench (5 and 10), the third module slot (8), and rank-only trails.
+- **Challenges** come in tiers (Horizon I–V and so on). Each tier pays echoes and XP, and the next tier opens right away.
+- **Daily contracts.** Three single-run tasks, dealt from the date so everyone gets the same hand that day, with goals that scale with rank. Clearing all three pays a bonus, and clearing on consecutive days builds a streak.
+- **Core mastery.** Distance travelled with a core raises its mastery, up to level 5. Each level adds 4% to the echoes that core earns.
+- **Module tuning.** Owned modules can be raised to Mk II and Mk III. Tuning scales a module's upside only; its drawback stays the same.
+
+Tuning numbers live in `src/content/progression.ts`, and the rules live in `src/game/progress.ts`. Saves from before ranks existed are migrated on load: paid challenge tiers stay paid, and past play is converted to XP.
+
 ## Layout
 
 - `src/sim` is the deterministic simulation: fixed 120 Hz step, seeded chunks, fairness checks.

@@ -14,6 +14,7 @@ export function defaultConfig(over: Partial<RunConfig> = {}): RunConfig {
     tutorial: true,
     gravityAbility: false,
     modules: [],
+    moduleLevels: {},
     trail: 'dusk',
     seen: [],
     visited: [],
@@ -47,7 +48,7 @@ function emptyStats(): RunStats {
 }
 
 export function createRun(config: RunConfig): Sim {
-  const mods = computeMods(config.core, config.modules, [], config.difficulty, config.mutator)
+  const mods = computeMods(config.core, config.modules, [], config.difficulty, config.mutator, config.moduleLevels)
   const ball: Ball = {
     x: 150,
     y: -86,

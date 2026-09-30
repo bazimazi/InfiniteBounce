@@ -26,7 +26,7 @@ export type ModuleId =
   | 'wall'
   | 'magnet'
 
-export type TrailId = 'none' | 'dusk' | 'ember' | 'ion' | 'petal' | 'void'
+export type TrailId = 'none' | 'dusk' | 'ember' | 'ion' | 'petal' | 'void' | 'aurora' | 'nova' | 'solar' | 'halo'
 
 export type MutatorId = 'none' | 'tailwind' | 'heavy' | 'nodash' | 'glass'
 
@@ -294,6 +294,8 @@ export interface RunConfig {
   tutorial: boolean
   gravityAbility: boolean
   modules: ModuleId[]
+  /** Tuning Mk per module (1 when absent). */
+  moduleLevels: Partial<Record<ModuleId, number>>
   trail: TrailId
   seen: string[]
   visited: BiomeId[]

@@ -55,6 +55,7 @@ export function resolveChoice(sim: Sim, cardId: string) {
       sim.runUpgradeIds,
       sim.config.difficulty,
       sim.config.mutator,
+      sim.config.moduleLevels,
     )
     if (sim.dashCharges > sim.mods.dashCharges) sim.dashCharges = sim.mods.dashCharges
     else if (cardId === 'dash2') sim.dashCharges = Math.min(sim.mods.dashCharges, sim.dashCharges + 1)
