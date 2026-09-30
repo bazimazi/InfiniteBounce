@@ -1,17 +1,17 @@
 import { AudioBus } from '../audio/audio'
 import { BIOME_COPY, DEATH_COPY } from '../content/catalog'
 import { TUNE } from '../content/tune'
-import { damp } from '../core/math'
+import { clamp, damp } from '../core/math'
 import { randomSeed } from '../core/rng'
 import { ViewFx } from '../fx/view'
 import { Input } from '../input/input'
-import { render, type Cam } from '../render/draw'
+import { groundBelow, lookOf, render, resetRenderState, trailColorOf, type Cam } from '../render/draw'
 import { autopilot } from '../sim/autopilot'
 import { resolveChoice } from '../sim/choices'
 import { createRun, defaultConfig } from '../sim/create'
 import { fixedStep } from '../sim/step'
 import type { GhostSample, InputFrame, Sim, SimEvent } from '../sim/types'
-import { Shell, type HudModel } from '../ui/shell'
+import { Shell, type BannerKind, type HudModel } from '../ui/shell'
 import {
   buy,
   commitRun,
@@ -58,9 +58,15 @@ export class Game {
   private deathAt = 0
   private bannerLife = 0
   private flash = 0
-  private shakeX = 0
-  private shakeY = 0
+  /** Camera trauma in [0, 1]; shake grows with its square so small hits stay subtle. */
+  private trauma = 0
+  /** Momentary zoom offset for punch-ins, decays to zero. */
+  private punch = 0
+  private lastPunch = 0
+  private deadFade = 0
+  private biomeBanner = false
   private elapsed = 0
+  private frameDt = 0.016
   private readonly input = new Input()
   private readonly audio = new AudioBus()
   private readonly fx = new ViewFx()
@@ -97,6 +103,11 @@ export class Game {
     this.applyAppearance()
     this.shell.showTitle(this.meta)
     this.snap(this.attract)
+    // ?demo starts a piloted run, handy for previewing presentation changes.
+    if (new URLSearchParams(location.search).has('demo')) {
+      this.autoplay = true
+      this.startRun(false)
+    }
   }
 
   start() {
@@ -107,6 +118,7 @@ export class Game {
     const dt = Math.min(0.05, this.last ? (t - this.last) / 1000 : 0.016)
     this.last = t
     this.elapsed = t
+    this.frameDt = dt
     this.tick(dt)
     requestAnimationFrame((now) => this.frame(now))
   }
@@ -128,6 +140,7 @@ export class Game {
       if (sim.choice?.cards[0]) resolveChoice(sim, sim.choice.cards[0].id)
       if (sim.dead) {
         this.attract = this.makeRun(false, true)
+        this.fx.clearAll()
         this.snap(this.attract)
       }
     } else if (playing && !sim.dead) {
@@ -147,6 +160,7 @@ export class Game {
       if (this.bannerLife <= 0) this.shell.banner('')
     }
     this.flash = Math.max(0, this.flash - dt * 2.4)
+    this.deadFade = sim.dead && !attract ? Math.min(1, this.deadFade + dt * 2.2) : Math.max(0, this.deadFade - dt * 4)
     this.fx.update(dt)
     this.follow(sim, dt)
     this.audio.biome = sim.biome
@@ -180,91 +194,149 @@ export class Game {
     }
     if (this.acc > TUNE.fixedDt) this.acc = 0
     this.consume(sim)
-    const fast = Math.hypot(sim.ball.vx, sim.ball.vy) > 280
-    if (fast || sim.ball.state === 'DASH') this.fx.pushTrail(sim.ball.x, sim.ball.y)
-    else if (this.fx.trail.length) this.fx.clearTrail()
+    const b = sim.ball
+    const speed = Math.hypot(b.vx, b.vy)
+    if (sim.dead) this.fx.clearTrail()
+    else if (speed > 240 || sim.dashTimer > 0) this.fx.pushTrail(b.x, b.y, speed)
+    else this.fx.fadeTrail()
+    if (sim.dashTimer > 0 && !sim.dead && !this.meta.settings.reducedMotion) this.fx.afterimage(b.x, b.y)
+    if (sim.config.trail === 'ember' && speed > 520 && !sim.dead && Math.random() < 0.35) {
+      this.fx.sparks(b.x, b.y, '#ff8a3c', 1, 80, Math.PI * 2)
+    }
   }
 
   private consume(sim: Sim) {
     const reduced = this.meta.settings.reducedMotion
     const flashMul = this.meta.settings.flash
-    for (const e of sim.events) this.feel(e, reduced, flashMul)
+    for (const e of sim.events) this.feel(sim, e, reduced, flashMul)
     sim.events.length = 0
   }
 
-  private feel(e: SimEvent, reduced: boolean, flashMul: number) {
+  private feel(sim: Sim, e: SimEvent, reduced: boolean, flashMul: number) {
+    const look = lookOf(sim.biome)
     const n = reduced ? 4 : 12
     switch (e.type) {
-      case 'bounce':
-        this.audio.bounce(e.speed, e.perfect)
-        this.fx.burst(e.x, e.y, e.perfect ? '#ffe08a' : '#fff6e8', e.perfect ? n : Math.max(3, n - 6), e.fast ? 180 : 90, e.perfect ? 3.2 : 2)
+      case 'bounce': {
+        const vy = Math.abs(sim.ball.vy)
+        const power = Math.min(1.4, vy / 900)
+        this.audio.bounce(vy, e.perfect, sim.chain)
+        this.fx.impact(Math.PI / 2, 0.1 + Math.min(0.2, vy / 5200))
+        this.fx.dust(e.x, e.y, look.dust, reduced ? 2 : 6, power)
         this.buzz(e.perfect ? 12 : 6)
+        if (e.kind === 'super' || e.kind === 'launch') {
+          this.fx.sparks(e.x, e.y, e.kind === 'launch' ? '#ffb15a' : '#8cff9e', reduced ? 3 : 10, 420, 0.9)
+          this.addTrauma(0.18)
+        }
         if (e.perfect) {
-          this.fx.text(e.x, e.y - 28, 'Perfect', '#ffe08a')
-          this.fx.ring(e.x, e.y, '#ffe08a', 1)
-          this.kick(5, 2)
-          this.flash = Math.max(this.flash, 0.18 * flashMul)
+          const chain = Math.floor(sim.chain)
+          this.fx.stars(e.x, e.y - 4, '#ffe08a', reduced ? 4 : 9, 260)
+          this.fx.text(e.x, e.y - 34, chain > 1 ? `Perfect ×${chain}` : 'Perfect', '#ffe08a', 16 + Math.min(8, chain * 0.4))
+          this.fx.ring(e.x, e.y, '#ffe08a', 1.1, 0.34, 3)
+          this.addTrauma(0.16)
+          this.punch = Math.max(this.punch, 0.035)
+          this.flash = Math.max(this.flash, 0.14 * flashMul)
         } else if (e.fast) {
-          this.fx.ring(e.x, e.y, '#fff', 0.7)
+          this.fx.sparks(e.x, e.y, '#fff4dc', reduced ? 2 : 6, 320, 1.4)
+          this.fx.ring(e.x, e.y, '#ffffff', 0.8, 0.3, 2)
+          this.addTrauma(0.08)
+        } else {
+          this.fx.ring(e.x, e.y, look.lip, 0.55, 0.28, 1.5)
         }
         break
+      }
       case 'wall':
         this.audio.wall(e.skill)
-        this.fx.burst(e.x, e.y, '#d7fff0', n, 160)
-        this.fx.ring(e.x, e.y, e.skill ? '#9ee7c4' : '#fff', e.skill ? 1 : 0.5)
-        if (e.skill) this.fx.text(e.x, e.y - 24, 'Wall', '#9ee7c4')
-        this.kick(4, 3)
+        this.fx.impact(0, 0.2)
+        this.fx.sparks(e.x, e.y, '#d7fff0', n, 260, 1.6, sim.ball.vx > 0 ? 0 : Math.PI)
+        this.fx.ring(e.x, e.y, e.skill ? '#9ee7c4' : '#ffffff', e.skill ? 1 : 0.5, 1, 2.5)
+        if (e.skill) this.fx.text(e.x, e.y - 26, 'Wall kick', '#9ee7c4')
+        this.addTrauma(e.skill ? 0.24 : 0.14)
         break
       case 'enemy':
-        this.audio.bounce(420, true)
+        this.audio.bounce(420, true, sim.chain)
+        this.fx.impact(Math.PI / 2, 0.24)
         this.fx.burst(e.x, e.y, '#ffd0e4', n, 150)
-        this.fx.text(e.x, e.y - 24, 'Step', '#ffd0e4')
+        this.fx.stars(e.x, e.y + 8, '#ffd0e4', reduced ? 3 : 6, 180)
+        this.fx.text(e.x, e.y - 26, 'Step', '#ffd0e4')
+        this.addTrauma(0.18)
         break
-      case 'dash':
+      case 'dash': {
         this.audio.dash()
-        this.fx.burst(e.x, e.y, '#fff', reduced ? 4 : 8, 220, 2)
-        this.kick(3, 1)
+        const back = Math.atan2(-sim.ball.vy, -sim.ball.vx)
+        this.fx.sparks(e.x, e.y, '#ffffff', reduced ? 4 : 12, 360, 1.1, back)
+        this.fx.ring(e.x, e.y, trailColorOf(sim.config.trail), 0.9, 1, 3)
+        this.fx.impact(Math.atan2(sim.ball.vy, sim.ball.vx), -0.2)
+        this.addTrauma(0.14)
+        this.punch = Math.min(this.punch, -0.03)
         this.buzz(10)
         break
+      }
       case 'nearmiss':
         this.audio.near()
-        this.fx.text(e.x, e.y - 36, 'Near miss', '#fff')
-        this.fx.ring(e.x, e.y, '#fff', 1.2)
-        this.kick(7, 4)
-        this.flash = Math.max(this.flash, 0.28 * flashMul)
+        this.fx.text(e.x, e.y - 38, e.threaded ? 'Threaded!' : 'Near miss', '#ffffff', 16)
+        this.fx.ring(e.x, e.y, '#ffffff', 1.3, 1, 2.5)
+        this.fx.sparks(e.x, e.y, '#ffffff', reduced ? 3 : 8, 300)
+        this.addTrauma(0.3)
+        this.punch = Math.max(this.punch, 0.04)
+        this.flash = Math.max(this.flash, 0.24 * flashMul)
         this.buzz(16)
         break
-      case 'pickup':
+      case 'pickup': {
         this.audio.pickup()
-        this.fx.burst(e.x, e.y, '#ffe08a', 8, 80, 2)
+        const color = e.kind === 'shield' ? '#9ee7ff' : e.kind === 'echo' ? look.accent : e.kind === 'fragment' ? '#fff4c2' : '#ffe08a'
+        this.fx.stars(e.x, e.y, color, reduced ? 3 : e.kind === 'fragment' ? 14 : 6, e.kind === 'fragment' ? 260 : 150)
+        this.fx.ring(e.x, e.y, color, 0.7, 1, 2)
+        if (e.kind === 'gem' && e.value > 0) this.fx.text(e.x, e.y - 20, `+${e.value}`, '#ffe08a', 13)
+        if (e.kind === 'echo') this.fx.text(e.x, e.y - 20, `+${e.value} echo`, color, 13)
         break
+      }
       case 'shield':
         this.audio.blip()
         this.toast('Shield', 'The next solid hit will break, not you.')
-        this.fx.ring(e.x, e.y, '#9ee7ff', 1.3)
+        this.fx.ring(e.x, e.y, '#9ee7ff', 1.6, 1, 3)
+        this.fx.shatter(e.x, e.y, ['#9ee7ff', '#e8fbff'], reduced ? 6 : 16, 260)
+        this.addTrauma(0.4)
         break
       case 'death': {
         this.audio.death()
         const copy = DEATH_COPY[e.id] ?? DEATH_COPY.FALLEN
-        this.toast(copy.title, copy.line)
-        this.fx.burst(e.x, e.y, '#ff8a7a', reduced ? 6 : 22, 240, 3)
-        this.kick(12, 8)
+        this.toast(copy.title, copy.line, 'death')
+        this.fx.shatter(e.x, e.y, ['#f7f2ff', trailColorOf(sim.config.trail), '#ff8a7a'], reduced ? 8 : 26, 380)
+        this.fx.burst(e.x, e.y, '#ff8a7a', reduced ? 6 : 18, 240, 3)
+        this.fx.ring(e.x, e.y, '#ff8a7a', 2, 1, 4)
+        this.addTrauma(0.75)
+        this.punch = Math.max(this.punch, 0.14)
         this.flash = Math.max(this.flash, 0.4 * flashMul)
         this.buzz(28)
         break
       }
-      case 'banner':
-        this.toast(e.text, e.sub ?? '')
+      case 'banner': {
+        const kind: BannerKind = this.biomeBanner
+          ? 'biome'
+          : e.text.startsWith('Flow')
+            ? 'flow'
+            : !e.sub && e.text.length > 22
+              ? 'lesson'
+              : 'default'
+        this.biomeBanner = false
+        this.toast(e.text, e.sub ?? '', kind)
         break
+      }
       case 'flow':
-        this.toast(`Flow ${e.chain}`, 'Stay in the phrase.')
+        this.audio.chord()
+        this.fx.ring(sim.ball.x, sim.ball.y, '#ffe08a', 2.4, 1, 4)
+        this.fx.stars(sim.ball.x, sim.ball.y, '#ffe08a', reduced ? 4 : 12, 320)
+        this.punch = Math.max(this.punch, 0.05)
         this.flash = Math.max(this.flash, 0.12 * flashMul)
         break
       case 'record':
-        this.audio.blip()
+        this.audio.chord()
+        this.fx.stars(sim.ball.x, sim.ball.y, '#ffe08a', reduced ? 4 : 16, 340)
+        this.fx.text(sim.ball.x, sim.ball.y - 44, 'New best!', '#ffe08a', 20)
         break
       case 'biome':
         this.audio.blip()
+        this.biomeBanner = true
         break
       case 'respawn':
         this.fx.clearTrail()
@@ -274,14 +346,13 @@ export class Game {
     }
   }
 
-  private toast(title: string, sub = '') {
-    this.shell.banner(title, sub)
-    this.bannerLife = sub ? 3.2 : 1.7
+  private toast(title: string, sub = '', kind: BannerKind = 'default') {
+    this.shell.banner(title, sub, kind)
+    this.bannerLife = kind === 'lesson' ? 3.8 : kind === 'biome' ? 3.4 : sub ? 3.2 : 1.7
   }
 
-  private kick(x: number, y: number) {
-    this.shakeX = (Math.random() * 2 - 1) * x
-    this.shakeY = (Math.random() * 2 - 1) * y
+  private addTrauma(amount: number) {
+    this.trauma = Math.min(1, this.trauma + amount)
   }
 
   private buzz(ms: number) {
@@ -296,20 +367,36 @@ export class Game {
   private follow(sim: Sim, dt: number) {
     const reduced = this.meta.settings.reducedMotion
     const w = this.canvas.clientWidth || window.innerWidth
-    const look = sim.ball.vx < -40 ? 0.62 : 0.34
-    const speed = Math.abs(sim.ball.vx)
-    const targetZoom = reduced ? 1.35 : Math.max(1.12, Math.min(1.48, 1.42 - speed / 2600))
-    const vertical = sim.ball.vy > 180 ? 90 : 0
-    this.cam.x = damp(this.cam.x, sim.ball.x, 8, dt)
-    this.cam.y = damp(this.cam.y, sim.ball.y - 20 + vertical, 5, dt)
-    this.cam.zoom = damp(this.cam.zoom, targetZoom, 2.5, dt)
-    this.cam.anchor = damp(this.cam.anchor, w * look, 4, dt)
+    const b = sim.ball
+    const maxV = TUNE.maxVx * sim.mods.maxVx
+    const pace = clamp(b.vx / maxV, -1, 1)
+    // Look ahead: the faster you go, the more road you see in front of you.
+    const look = b.vx < -40 ? 0.62 + Math.max(0, -pace) * 0.08 : 0.34 - Math.max(0, pace) * 0.1
+    // Frame the arc instead of chasing every bounce: sit between the ball and its landing.
+    const ground = sim.dead ? null : groundBelow(sim, b.x, b.y)
+    const height = ground === null ? 0 : Math.max(0, ground - b.y)
+    const framed = ground === null ? b.y : b.y * 0.55 + (ground - 70) * 0.45
+    const falling = b.vy > 260 && ground === null ? 110 : 0
+    const speed = Math.abs(b.vx)
+    let targetZoom = reduced ? 1.35 : clamp(1.42 - speed / 2600, 1.12, 1.48)
+    if (!reduced) targetZoom -= Math.min(0.16, height / 2600)
+    this.cam.x = damp(this.cam.x, b.x, 8, dt)
+    this.cam.y = damp(this.cam.y, framed - 10 + falling, 4.2, dt)
+    this.punch = damp(this.punch, 0, 7, dt)
+    const baseZoom = damp(this.cam.zoom / (1 + this.lastPunch), targetZoom, 2.2, dt)
+    const punch = reduced ? 0 : this.punch
+    this.cam.zoom = baseZoom * (1 + punch)
+    this.lastPunch = punch
+    this.cam.anchor = damp(this.cam.anchor, w * look, 3, dt)
     const shake = reduced ? 0 : this.meta.settings.shake
-    this.shakeX = damp(this.shakeX, 0, 14, dt)
-    this.shakeY = damp(this.shakeY, 0, 14, dt)
-    this.cam.shakeX = this.shakeX * shake
-    this.cam.shakeY = this.shakeY * shake
-    this.cam.tilt = reduced ? 0 : Math.max(-0.035, Math.min(0.035, sim.ball.vx / 14000)) * (shake > 0 ? 1 : 0)
+    this.trauma = Math.max(0, this.trauma - dt * 1.7)
+    const t = this.elapsed / 1000
+    const k = this.trauma * this.trauma * shake
+    // Smooth layered sines rather than per-frame random jitter.
+    this.cam.shakeX = 18 * k * (Math.sin(t * 41.3) * 0.6 + Math.sin(t * 73.1 + 1.7) * 0.4)
+    this.cam.shakeY = 14 * k * (Math.sin(t * 37.7 + 0.5) * 0.6 + Math.sin(t * 67.9 + 2.9) * 0.4)
+    const lean = reduced || shake <= 0 ? 0 : clamp(b.vx / 20000, -0.022, 0.022)
+    this.cam.tilt = lean + 0.05 * k * Math.sin(t * 29.3 + 4.1)
   }
 
   private paint(sim: Sim) {
@@ -332,6 +419,8 @@ export class Game {
       fx: this.fx,
       ghost: this.ghostFor(sim),
       elapsed: this.elapsed,
+      dt: this.frameDt,
+      dead: this.deadFade,
       colorblind: this.meta.settings.colorblind,
       reduced: this.meta.settings.reducedMotion,
       debug: this.debug,
@@ -352,19 +441,25 @@ export class Game {
       return
     }
     const maxV = TUNE.maxVx * sim.mods.maxVx
-    const ready = sim.dashCharges
+    const meter = Math.max(0, Math.min(1, Math.abs(sim.ball.vx) / maxV))
+    const grace = TUNE.chainGrace / sim.mods.flowDecay
+    const cd = TUNE.dashCd * sim.mods.dashCd
     const model: HudModel = {
       visible: true,
-      distance: `${Math.floor(sim.distance).toLocaleString('en-US')} m`,
-      score: Math.floor(sim.score).toLocaleString('en-US'),
-      chain: `Flow ${Math.floor(sim.chain)}`,
+      distance: sim.distance,
+      best: sim.config.practice ? 0 : sim.personalBest,
+      score: sim.score,
+      chain: Math.floor(sim.chain),
+      flowLeft: sim.chain >= 1 ? Math.max(0, 1 - sim.flowIdle / grace) : 0,
       hot: sim.chain >= 8,
       speed: speedLabel(Math.abs(sim.ball.vx)),
       state: STATE[sim.ball.state] ?? 'Air',
-      meter: Math.max(0, Math.min(1, Math.abs(sim.ball.vx) / maxV)),
-      dash: sim.mods.dashCharges <= 0 ? '' : ready > 1 ? `Dash ×${ready}` : ready === 1 ? 'Dash' : '···',
-      dashLabel: sim.mods.dashCharges <= 0 ? 'Dash unavailable' : `${ready} dash${ready === 1 ? '' : 'es'} ready`,
-      shield: sim.shield > 0 ? `Shield ${sim.shield}` : '',
+      critical: meter > 0.82,
+      meter,
+      dashMax: Math.max(0, sim.mods.dashCharges),
+      dashReady: sim.dashCharges,
+      dashCharge: cd > 0 && sim.dashCharges < sim.mods.dashCharges ? 1 - sim.dashCd / cd : 1,
+      shield: sim.shield,
       biome: BIOME_COPY[sim.biome].name,
       practice: sim.config.practice,
     }
@@ -509,7 +604,7 @@ export class Game {
     this.mode = 'play'
     this.menuReturn = 'pause'
     this.acc = 0
-    this.fx.clearTrail()
+    this.fx.clearAll()
     this.shell.hidePanel()
     this.shell.banner('')
     this.snap(this.sim)
@@ -525,7 +620,7 @@ export class Game {
     this.mode = 'practice'
     this.menuReturn = 'pause'
     this.acc = 0
-    this.fx.clearTrail()
+    this.fx.clearAll()
     this.shell.hidePanel()
     this.shell.banner('Practice', 'Falls return you to the yard.')
     this.bannerLife = 2.4
@@ -656,8 +751,12 @@ export class Game {
     this.cam.anchor = (this.canvas.clientWidth || window.innerWidth) * 0.34
     this.cam.shakeX = 0
     this.cam.shakeY = 0
-    this.shakeX = 0
-    this.shakeY = 0
+    this.cam.tilt = 0
+    this.trauma = 0
+    this.punch = 0
+    this.lastPunch = 0
+    this.deadFade = 0
+    resetRenderState()
   }
 
   private applyAppearance() {
@@ -678,16 +777,20 @@ export class Game {
 function blankHud(): HudModel {
   return {
     visible: false,
-    distance: '',
-    score: '',
-    chain: '',
+    distance: 0,
+    best: 0,
+    score: 0,
+    chain: 0,
+    flowLeft: 0,
     hot: false,
     speed: '',
     state: '',
+    critical: false,
     meter: 0,
-    dash: '',
-    dashLabel: '',
-    shield: '',
+    dashMax: 0,
+    dashReady: 0,
+    dashCharge: 0,
+    shield: 0,
     biome: '',
     practice: false,
   }

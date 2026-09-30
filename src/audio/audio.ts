@@ -98,14 +98,33 @@ export class AudioBus {
     }
   }
 
-  bounce(speed: number, perfect: boolean) {
+  bounce(speed: number, perfect: boolean, chain = 0) {
     if (!this.sfxVol) return
     this.resume()
     const ctx = this.ensure()
     if (!this.sfx) return
+    const now = ctx.currentTime
     const f = 150 + Math.min(280, speed * 0.18)
-    this.tone(this.sfx, f, ctx.currentTime, 0.09, 'sine', perfect ? 0.16 : 0.09)
-    if (perfect) this.tone(this.sfx, f * 1.5, ctx.currentTime, 0.14, 'triangle', 0.08)
+    this.tone(this.sfx, f, now, 0.09, 'sine', perfect ? 0.14 : 0.09)
+    this.noiseHit(now, 0.03, 0.04, 260)
+    if (perfect) {
+      // Each perfect in a chain climbs the biome's scale, so a streak sings upward.
+      const scale = this.biome === 'meadow' || this.biome === 'sky' || this.biome === 'cosmic' ? MAJOR : MINOR
+      const step = Math.min(14, Math.max(0, Math.floor(chain) - 1))
+      const note = ROOT[this.biome] + 24 + scale[step % scale.length] + 12 * Math.floor(step / scale.length)
+      this.tone(this.sfx, midi(note), now, 0.18, 'triangle', 0.09)
+      this.tone(this.sfx, midi(note + 12), now + 0.04, 0.12, 'sine', 0.04)
+    }
+  }
+
+  chord() {
+    if (!this.sfxVol) return
+    this.resume()
+    const ctx = this.ensure()
+    if (!this.sfx) return
+    const scale = this.biome === 'meadow' || this.biome === 'sky' || this.biome === 'cosmic' ? MAJOR : MINOR
+    const root = ROOT[this.biome] + 24
+    ;[0, 2, 4].forEach((d, i) => this.tone(this.sfx!, midi(root + scale[d]), ctx.currentTime + i * 0.05, 0.4, 'triangle', 0.06))
   }
 
   wall(skill: boolean) {

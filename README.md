@@ -17,6 +17,7 @@ Open the local URL Vite prints. `npm test` checks that the same seed rebuilds th
 - Drag on the ground to lean. A gamepad uses the left stick, the south button to dash, and the west button for a gravity pulse.
 - **F** flips gravity once that pulse is learned.
 - **Esc** pauses. **F3** shows chunk names. **F8** lets a pilot drive the safe route.
+- Open the page with `?demo` to start a piloted run straight away, handy for checking visual changes.
 
 The low road is always a possible landing. Gold trim is optional.
 
